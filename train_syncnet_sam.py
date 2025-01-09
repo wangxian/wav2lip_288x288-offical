@@ -16,24 +16,25 @@ import torch.backends.cudnn as cudnn
 from torch.utils import data as data_utils
 import numpy as np
 
-from glob import glob
-
-import os, random, cv2, argparse
+import os
+import random
+import cv2
+import argparse
 from hparams import hparams, get_image_list
+from glob import glob
 
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from pytorch_lightning.loggers import CSVLogger
 
+from pytorch_lightning.loggers import CSVLogger
 
 parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
 
-parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=False,default="checkpoints/syncnet/",type=str)
+parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=False, default="checkpoints/syncnet/", type=str)
 parser.add_argument('--exp_num', help='ID number of the experiment', required=False, default="actor", type=str)
-parser.add_argument('--history_train', help='Save history training', required=False,default="logs/syncnet/",type=str)
+parser.add_argument('--history_train', help='Save history training', required=False, default="logs/syncnet/", type=str)
 parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
 args = parser.parse_args()
-
 
 global_step = 0
 global_epoch = 0
@@ -45,6 +46,7 @@ syncnet_T = 5
 syncnet_mel_step_size = 16
 format_video = 'mov'
 hparams.set_hparam("img_size", 384)
+
 
 # mel augmentation
 def mask_mel(crop_mel):
@@ -62,6 +64,8 @@ def mask_mel(crop_mel):
     mel[:, freq_st:freq_st + freq_size] = -4.
 
     return mel
+
+
 def get_audio_length(audio_path):
     """Get the length of the audio file in seconds"""
     cmd = 'ffprobe -i {} -show_entries format=duration -v quiet -of csv="p=0"'.format(audio_path)
@@ -72,6 +76,7 @@ def get_audio_length(audio_path):
 class Dataset(object):
     def __init__(self, file_list):
         self.all_videos = get_image_list(file_list)
+
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
 
@@ -86,7 +91,6 @@ class Dataset(object):
             window_fnames.append(frame)
         return window_fnames
 
-
     def crop_audio_window(self, spec, start_frame):
         # num_frames = (T x hop_size * fps) / sample_rate
         start_frame_num = self.get_frame_id(start_frame)
@@ -94,25 +98,24 @@ class Dataset(object):
 
         end_idx = start_idx + syncnet_mel_step_size
 
-        return spec[start_idx : end_idx, :]
-    
+        return spec[start_idx: end_idx, :]
+
     def __len__(self):
         return len(self.all_videos)
 
     def __getitem__(self, idx):
         while 1:
-            
             idx = random.randint(0, len(self.all_videos) - 1)
             vidname = self.all_videos[idx]
             img_names = list(glob(join(vidname, '*.jpg')))
-                
+
             # print("len(img_names)):", len(img_names))
             if len(img_names) <= 3 * syncnet_T:
                 continue
-            
+
             img_name = random.choice(img_names)
             wrong_img_name = random.choice(img_names)
-            
+
             count_same = 0
             while wrong_img_name == img_name:
                 wrong_img_name = random.choice(img_names)
@@ -121,7 +124,7 @@ class Dataset(object):
                     break
             if count_same > 10:
                 continue
-            
+
             if random.choice([True, False]):
                 y = torch.ones(1).float()
                 chosen = img_name
@@ -154,7 +157,6 @@ class Dataset(object):
                 print("if not all_read:")
                 continue
 
-
             try:
                 mel_out_path = join(vidname, "mel.npy")
                 if os.path.isfile(mel_out_path):  # x50 times faster - 0.002 -> 0.01s
@@ -167,7 +169,7 @@ class Dataset(object):
                     orig_mel = audio.melspectrogram(wav).T  # 0.2 -> 0.9s
                     with open(mel_out_path, "wb") as f:
                         np.save(f, orig_mel)
-            except Exception as e:
+            except Exception:
                 # print("mel", vidname)
                 continue
 
@@ -194,34 +196,38 @@ class Dataset(object):
 
             return x, mel, y
 
+
 logloss = nn.BCELoss()
+
+
 def cosine_loss(a, v, y):
     d = nn.functional.cosine_similarity(a, v)
     loss = logloss(d.unsqueeze(1), y)
 
     return loss
 
-def train(device, model, train_data_loader, test_data_loader, optimizer,
-          checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
+
+def train(device, model, train_data_loader, test_data_loader, optimizer, checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
 
     global global_step, global_epoch
     resumed_step = global_step
     logger = CSVLogger(args.history_train, name=args.exp_num)
 
     stop_training = False
+
     while global_epoch < nepochs:
         st_e = time()
         try:
             print('Starting Epoch: {}'.format(global_epoch))
             running_loss = 0.
             for step, (x, mel, y) in enumerate(train_data_loader):
-                
+
                 st = time()
                 model.train()
                 optimizer.zero_grad()
 
                 x = x.to(device)
-            
+
                 mel = mel.to(device)
                 y = y.to(device)
                 a, v = model(mel, x)
@@ -254,16 +260,19 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                     model.train()
 
                 # prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
-                #delete(x,mel,y)
+                # delete(x, mel, y)
                 del x, mel, y
+
             if stop_training:
                 print("The model has converged, stop training.")
                 break
+
             print("Epoch time:", time() - st_e)
             global_epoch += 1
         except KeyboardInterrupt:
             print("KeyboardInterrupt")
             break
+
     save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, 1000)
     logger.save()
 
@@ -293,8 +302,10 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 
     return averaged_loss
 
+
 def upload_file(path):
     pass
+
 
 def save_ckpt(model, optimizer, step, checkpoint_dir, epoch, model_name):
     checkpoint_path = join(checkpoint_dir, model_name)
@@ -338,6 +349,7 @@ def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, loss_val):
         os.remove(ckpt_path)
         print("Deleted", ckpt_path)
 
+
 def _load(checkpoint_path):
     if use_cuda:
         checkpoint = torch.load(checkpoint_path)
@@ -345,6 +357,7 @@ def _load(checkpoint_path):
         checkpoint = torch.load(checkpoint_path,
                                 map_location=lambda storage, loc: storage)
     return checkpoint
+
 
 def load_checkpoint(path, model, optimizer, reset_optimizer=False):
     global global_step
@@ -372,11 +385,13 @@ def run():
     checkpoint_dir = os.path.join(args.checkpoint_dir, args.exp_num)
     checkpoint_path = args.checkpoint_path
 
-    if not os.path.exists(checkpoint_dir): os.makedirs(checkpoint_dir)
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
 
     train_dataset = Dataset('filelists/train.txt')
     test_dataset = Dataset('filelists/test.txt')
     hparams.set_hparam("syncnet_batch_size", 64)
+
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,
         num_workers=hparams.num_workers,
@@ -397,9 +412,7 @@ def run():
 
     print('total trainable params {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
-
-    optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad],
-                           lr=hparams.syncnet_lr)
+    optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad], lr=hparams.syncnet_lr)
 
     if checkpoint_path is not None:
         load_checkpoint(checkpoint_path, model, optimizer, reset_optimizer=False)
@@ -408,7 +421,7 @@ def run():
 
     # model = nn.DataParallel(model).to(device)
 
-    train(device, model, train_data_loader,test_data_loader, optimizer,
+    train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=checkpoint_dir,
           checkpoint_interval=hparams.syncnet_checkpoint_interval,
           nepochs=hparams.nepochs)

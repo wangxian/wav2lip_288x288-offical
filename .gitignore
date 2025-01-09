@@ -1,2 +1,5 @@
 face_detection/detection/sfd/s3fd.pth
 video_data/data/*/*.mp4
+video_data/data
+video_data/processed
+checkpoints/*

@@ -9,6 +9,10 @@ opencv-python
 tqdm
 numba
 
+torchsummary
+pandas
+pytorch_lightning
+
 # torch==1.1.0
 # torchvision==0.3.0
 
